@@ -1,0 +1,1 @@
+{"name":"wiki-platform","private":true,"packageManager":"pnpm@9.15.0","scripts":{"dev":"pnpm --parallel --filter './apps/*' dev","build":"pnpm -r build","lint":"pnpm -r lint","test":"pnpm -r test","db:generate":"pnpm --filter @wiki/db generate","db:migrate":"pnpm --filter @wiki/db migrate"},"engines":{"node":">=20"}}
