@@ -15,14 +15,15 @@ cd "$(dirname "$0")/.."
 export DATABASE_URL
 
 # --- the pieces of DATABASE_URL this script needs ---------------------------
-url_part() { # $1: sed capture to pull out of the URL
+# `#` is the sed delimiter, not `|`: the expressions below use alternation.
+url_part() { # $1: sed expression to pull a piece out of the URL
   printf '%s' "$DATABASE_URL" | sed -E "$1"
 }
-DB_HOST="$(url_part 's|^[a-zA-Z]+://([^@]*@)?(\[[^]]+\]|[^:/?]+).*|\2|')"
-DB_PORT="$(printf '%s' "$DATABASE_URL" | sed -nE 's|^[a-zA-Z]+://([^@]*@)?(\[[^]]+\]|[^:/?]+):([0-9]+).*|\3|p')"
-DB_USER="$(url_part 's|^[a-zA-Z]+://([^:/@]*)(:[^@]*)?@.*|\1|')"
-DB_PASSWORD="$(printf '%s' "$DATABASE_URL" | sed -nE 's|^[a-zA-Z]+://[^:/@]*:([^@]*)@.*|\1|p')"
-DB_NAME="$(printf '%s' "$DATABASE_URL" | sed -nE 's|^[^?]*/([^/?]+)(\?.*)?$|\1|p')"
+DB_HOST="$(url_part 's#^[a-zA-Z]+://([^@]*@)?(\[[^]]+\]|[^:/?]+).*#\2#')"
+DB_PORT="$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[a-zA-Z]+://([^@]*@)?(\[[^]]+\]|[^:/?]+):([0-9]+).*#\3#p')"
+DB_USER="$(url_part 's#^[a-zA-Z]+://([^:/@]*)(:[^@]*)?@.*#\1#')"
+DB_PASSWORD="$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[a-zA-Z]+://[^:/@]*:([^@]*)@.*#\1#p')"
+DB_NAME="$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[^?]*/([^/?]+)(\?.*)?$#\1#p')"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-openpedia}"
