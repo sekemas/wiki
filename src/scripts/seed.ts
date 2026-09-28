@@ -5,26 +5,26 @@
  * Upserts by slug, so running it twice does not duplicate anything. Existing
  * articles keep their timestamps and revision history.
  */
-import { databaseFile, openDatabase } from "../db";
+import { prisma } from "../prisma";
 import { seedDatabase } from "../seed";
 
-const db = openDatabase();
-const report = seedDatabase(db);
+const report = await seedDatabase();
 
-console.log(`seeded ${databaseFile()}`);
+// Never print the password half of the connection string.
+const target = (process.env.DATABASE_URL ?? "(DATABASE_URL unset)").replace(/:[^:@/]*@/, ":***@");
+console.log(`seeded ${target}`);
 console.log(`  categories        ${report.categories}`);
 console.log(`  articles inserted ${report.articlesInserted}`);
 console.log(`  articles updated  ${report.articlesUpdated}`);
 console.log(`  revisions added   ${report.revisionsInserted}`);
 
-const totals = db
-  .query<{ articles: number; revisions: number; categories: number }, []>(
-    `SELECT (SELECT COUNT(*) FROM articles)   AS articles,
-            (SELECT COUNT(*) FROM revisions)  AS revisions,
-            (SELECT COUNT(*) FROM categories) AS categories`,
-  )
-  .get();
+const [articles, categories, revisions] = await Promise.all([
+  prisma.article.count(),
+  prisma.category.count(),
+  prisma.revision.count(),
+]);
 console.log(
-  `  totals now: ${totals?.articles ?? 0} articles, ${totals?.categories ?? 0} categories, ${totals?.revisions ?? 0} revisions`,
+  `  totals now: ${articles} articles, ${categories} categories, ${revisions} revisions`,
 );
-db.close();
+
+await prisma.$disconnect();

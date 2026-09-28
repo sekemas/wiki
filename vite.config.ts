@@ -29,6 +29,14 @@ export default defineConfig({
       deny: [".env", ".env.*", "*.{crt,pem,key}", "**/.run/**", "**/.git/**"],
     },
   },
+  // Prisma stays outside the SSR bundle. The generated client loads a native
+  // query engine by path, which bundling breaks; keeping it external means the
+  // production server (serve.ts -> dist/server/server.js) requires it from
+  // node_modules at run time, where `prisma generate` put it. Nothing imports
+  // Prisma from client code: the server functions import their queries lazily.
+  ssr: {
+    external: ["@prisma/client", ".prisma/client"],
+  },
   plugins: [
     tailwindcss(),
     tsConfigPaths({

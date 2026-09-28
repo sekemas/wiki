@@ -1,0 +1,190 @@
+// Openpedia's data layer: PostgreSQL, described once, here.
+//
+// One schema covers the whole application, not just the read experience that is
+// live today: accounts with roles and status, login sessions, article status,
+// the protect/lock flag, media and the audit log all exist from the first
+// migration so the later phases fill in behaviour rather than tables.
+//
+// The committed SQL under prisma/migrations is the source of truth for the
+// database — `prisma migrate deploy` builds a database from empty, and no one
+// relies on `db push` (which would leave the repo unable to reproduce itself).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Where an article sits in the editorial workflow. Public pages only ever read
+/// PUBLISHED articles; contributors create drafts and editors publish them.
+enum ArticleStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+}
+
+/// What a signed-in account is allowed to do. Every check happens on the server.
+enum Role {
+  CONTRIBUTOR
+  EDITOR
+  MODERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+model Article {
+  id        Int           @id @default(autoincrement())
+  slug      String        @unique
+  title     String
+  summary   String        @default("")
+  body      String        @default("")
+  status    ArticleStatus @default(DRAFT)
+  /// Protected/locked against contributor edits by an editor or moderator.
+  locked    Boolean       @default(false)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  categories ArticleCategory[]
+  revisions  Revision[]
+
+  /// The public read paths list and order by recency.
+  @@index([updatedAt(sort: Desc)])
+  @@index([status, updatedAt(sort: Desc)])
+  @@map("articles")
+}
+
+model Category {
+  id          Int    @id @default(autoincrement())
+  slug        String @unique
+  name        String
+  description String @default("")
+
+  articles ArticleCategory[]
+
+  @@map("categories")
+}
+
+/// Explicit join table so the relation can carry its own indexes and columns
+/// later (ordering, "added by") without an implicit-relation migration.
+model ArticleCategory {
+  articleId  Int
+  categoryId Int
+
+  article  Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, categoryId])
+  @@index([categoryId])
+  @@map("article_categories")
+}
+
+model Revision {
+  id         Int      @id @default(autoincrement())
+  articleId  Int
+  title      String
+  body       String
+  /// The name shown in history: the author's display name, or "Openpedia
+  /// editors" for seeded and anonymous-attributed work. Kept as text as well as
+  /// a link, so history survives an account being removed.
+  editorName String
+  editorId   Int?
+  note       String   @default("")
+  createdAt  DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  editor  User?   @relation(fields: [editorId], references: [id], onDelete: SetNull)
+
+  /// History is always read as "this article, newest first".
+  @@index([articleId, createdAt(sort: Desc)])
+  @@index([editorId])
+  @@map("revisions")
+}
+
+model User {
+  id           Int        @id @default(autoincrement())
+  /// Stored lower-cased; the application normalises before writing or looking up.
+  email        String     @unique
+  displayName  String     @unique
+  passwordHash String
+  role         Role       @default(CONTRIBUTOR)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+
+  sessions  Session[]
+  revisions Revision[]
+  media     Media[]
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  /// SHA-256 of the cookie token: the cookie carries the token, the database
+  /// carries only the hash, so a leaked dump is not a pile of usable sessions.
+  tokenHash String   @unique
+  userId    Int
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Media {
+  id           Int       @id @default(autoincrement())
+  /// The name the uploader's file had, kept for display and download.
+  filename     String
+  /// Where the bytes live on disk, relative to the media root.
+  storedPath   String
+  mimeType     String
+  kind         MediaKind
+  sizeBytes    Int
+  width        Int?
+  height       Int?
+  caption      String?
+  altText      String?
+  uploadedById Int?
+  createdAt    DateTime  @default(now())
+
+  uploadedBy User? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@index([uploadedById])
+  @@index([createdAt(sort: Desc)])
+  @@map("media")
+}
+
+/// Every privileged action, append-only. actorEmail is denormalised on purpose:
+/// the log must still read correctly if the account is later changed or removed.
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  actorId    Int?
+  actorEmail String?
+  action     String
+  targetType String
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc)])
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@map("audit_log")
+}

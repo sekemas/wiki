@@ -1,8 +1,18 @@
 /**
- * Read queries for Openpedia. Server-only — route code calls these through the
- * server functions in `src/server-fns.ts`.
+ * Read queries for Openpedia, on PostgreSQL through Prisma.
+ *
+ * Server-only — route code calls these through the server functions in
+ * `src/server-fns.ts`, which import this module lazily so Prisma can never be
+ * pulled into a client bundle.
+ *
+ * This module is also the mapping boundary: Prisma models are never handed to
+ * React. Each row is converted to the plain, dependency-free shape declared in
+ * `src/types.ts`, with timestamps as ISO strings, so components only ever see
+ * serialisable data. Public reads only ever return PUBLISHED articles.
  */
-import { getDb } from "./db";
+import type { Prisma } from "@prisma/client";
+
+import { prisma } from "./prisma";
 import type {
   ArticlePage,
   ArticleRow,
@@ -15,142 +25,220 @@ import type {
   SearchResults,
 } from "./types";
 
-function categoryRefs(articleId: number, db = getDb()): CategoryRef[] {
-  return db
-    .query<CategoryRef, [number]>(
-      `SELECT c.slug AS slug, c.name AS name
-         FROM categories c
-         JOIN article_categories ac ON ac.category_id = c.id
-        WHERE ac.article_id = ?
-        ORDER BY c.name`,
-    )
-    .all(articleId);
+const iso = (value: Date): string => value.toISOString();
+
+/** Categories come back as a join table; this is the include every read uses. */
+const withCategories = {
+  categories: { include: { category: { select: { slug: true, name: true } } } },
+} satisfies Prisma.ArticleInclude;
+
+type ArticleWithCategories = Prisma.ArticleGetPayload<{ include: typeof withCategories }>;
+
+function categoriesOf(article: ArticleWithCategories): CategoryRef[] {
+  return article.categories
+    .map((link) => ({ slug: link.category.slug, name: link.category.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function decorate(rows: ArticleRow[], db = getDb()): ArticleSummary[] {
-  return rows.map((row) => ({
-    slug: row.slug,
-    title: row.title,
-    summary: row.summary,
-    updated_at: row.updated_at,
-    categories: categoryRefs(row.id, db),
+function toArticleRow(article: ArticleWithCategories): ArticleRow {
+  return {
+    id: article.id,
+    slug: article.slug,
+    title: article.title,
+    summary: article.summary,
+    body: article.body,
+    created_at: iso(article.createdAt),
+    updated_at: iso(article.updatedAt),
+  };
+}
+
+function decorate(articles: ArticleWithCategories[]): ArticleSummary[] {
+  return articles.map((article) => ({
+    slug: article.slug,
+    title: article.title,
+    summary: article.summary,
+    updated_at: iso(article.updatedAt),
+    categories: categoriesOf(article),
   }));
 }
 
-export function getArticleBySlug(slug: string): ArticleRow | null {
-  return (
-    getDb()
-      .query<ArticleRow, [string]>(
-        "SELECT * FROM articles WHERE slug = ? COLLATE NOCASE",
-      )
-      .get(slug) ?? null
-  );
+/** A–Z orders are case-insensitive, which the database collation is not. */
+function byTitle(a: { title: string }, b: { title: string }): number {
+  return a.title.localeCompare(b.title, "en", { sensitivity: "base" });
 }
 
-export function allSlugs(): string[] {
-  return getDb()
-    .query<{ slug: string }, []>("SELECT slug FROM articles ORDER BY slug")
-    .all()
-    .map((r) => r.slug);
+export async function getArticleBySlug(slug: string): Promise<ArticleRow | null> {
+  const article = await prisma.article.findFirst({
+    where: { slug: { equals: slug, mode: "insensitive" }, status: "PUBLISHED" },
+    include: withCategories,
+  });
+  return article ? toArticleRow(article) : null;
 }
 
-export function getRecentArticles(limit = 6): ArticleSummary[] {
-  const rows = getDb()
-    .query<ArticleRow, [number]>(
-      "SELECT * FROM articles ORDER BY updated_at DESC LIMIT ?",
-    )
-    .all(limit);
-  return decorate(rows);
+export async function allSlugs(): Promise<string[]> {
+  const rows = await prisma.article.findMany({
+    where: { status: "PUBLISHED" },
+    select: { slug: true },
+    orderBy: { slug: "asc" },
+  });
+  return rows.map((row) => row.slug);
 }
 
-export function getAllArticles(): ArticleSummary[] {
-  const rows = getDb()
-    .query<ArticleRow, []>("SELECT * FROM articles ORDER BY title COLLATE NOCASE")
-    .all();
-  return decorate(rows);
+export async function getRecentArticles(limit = 6): Promise<ArticleSummary[]> {
+  const articles = await prisma.article.findMany({
+    where: { status: "PUBLISHED" },
+    include: withCategories,
+    orderBy: { updatedAt: "desc" },
+    take: limit,
+  });
+  return decorate(articles);
 }
 
-export function getCategories(): CategoryWithCount[] {
-  return getDb()
-    .query<CategoryWithCount, []>(
-      `SELECT c.slug AS slug, c.name AS name, c.description AS description,
-              COUNT(ac.article_id) AS articleCount
-         FROM categories c
-         LEFT JOIN article_categories ac ON ac.category_id = c.id
-        GROUP BY c.id
-        ORDER BY c.name`,
-    )
-    .all();
+export async function getAllArticles(): Promise<ArticleSummary[]> {
+  const articles = await prisma.article.findMany({
+    where: { status: "PUBLISHED" },
+    include: withCategories,
+  });
+  return decorate(articles).sort(byTitle);
 }
 
-export function getCategoryBySlug(slug: string): CategoryRow | null {
-  return (
-    getDb()
-      .query<CategoryRow, [string]>("SELECT * FROM categories WHERE slug = ? COLLATE NOCASE")
-      .get(slug) ?? null
-  );
+export async function getCategories(): Promise<CategoryWithCount[]> {
+  const categories = await prisma.category.findMany({
+    include: {
+      // Counted through the join table, published articles only.
+      _count: { select: { articles: { where: { article: { status: "PUBLISHED" } } } } },
+    },
+  });
+  return categories
+    .map((category) => ({
+      slug: category.slug,
+      name: category.name,
+      description: category.description,
+      articleCount: category._count.articles,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function getArticlesInCategory(categoryId: number): ArticleSummary[] {
-  const rows = getDb()
-    .query<ArticleRow, [number]>(
-      `SELECT a.* FROM articles a
-         JOIN article_categories ac ON ac.article_id = a.id
-        WHERE ac.category_id = ?
-        ORDER BY a.title COLLATE NOCASE`,
-    )
-    .all(categoryId);
-  return decorate(rows);
+export async function getCategoryBySlug(slug: string): Promise<CategoryRow | null> {
+  return prisma.category.findFirst({
+    where: { slug: { equals: slug, mode: "insensitive" } },
+    select: { id: true, slug: true, name: true, description: true },
+  });
 }
 
-export function getRevisions(articleId: number): RevisionRow[] {
-  return getDb()
-    .query<RevisionRow, [number]>(
-      "SELECT * FROM revisions WHERE article_id = ? ORDER BY created_at DESC, id DESC",
-    )
-    .all(articleId);
+export async function getArticlesInCategory(categoryId: number): Promise<ArticleSummary[]> {
+  const links = await prisma.articleCategory.findMany({
+    where: { categoryId, article: { status: "PUBLISHED" } },
+    include: { article: { include: withCategories } },
+  });
+  return decorate(links.map((link) => link.article)).sort(byTitle);
 }
 
-export function getArticlePage(slug: string): ArticlePage | null {
-  const db = getDb();
-  const article = getArticleBySlug(slug);
+export async function getRevisions(articleId: number): Promise<RevisionRow[]> {
+  const revisions = await prisma.revision.findMany({
+    where: { articleId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  return revisions.map((revision) => ({
+    id: revision.id,
+    article_id: revision.articleId,
+    title: revision.title,
+    body: revision.body,
+    editor_name: revision.editorName,
+    note: revision.note,
+    created_at: iso(revision.createdAt),
+  }));
+}
+
+/** One revision of one article, or null (the pair must match). */
+export async function getRevision(
+  articleId: number,
+  revisionId: number,
+): Promise<RevisionRow | null> {
+  const revision = await prisma.revision.findFirst({ where: { id: revisionId, articleId } });
+  if (!revision) return null;
+  return {
+    id: revision.id,
+    article_id: revision.articleId,
+    title: revision.title,
+    body: revision.body,
+    editor_name: revision.editorName,
+    note: revision.note,
+    created_at: iso(revision.createdAt),
+  };
+}
+
+/** Everything the edit form starts from: the current article and its categories. */
+export async function getArticleForEdit(slug: string): Promise<{
+  slug: string;
+  title: string;
+  summary: string;
+  body: string;
+  categorySlugs: string[];
+} | null> {
+  const article = await prisma.article.findFirst({
+    where: { slug: { equals: slug, mode: "insensitive" } },
+    include: withCategories,
+  });
+  if (!article) return null;
+  return {
+    slug: article.slug,
+    title: article.title,
+    summary: article.summary,
+    body: article.body,
+    categorySlugs: article.categories.map((link) => link.category.slug),
+  };
+}
+
+export async function getArticlePage(slug: string): Promise<ArticlePage | null> {
+  const article = await prisma.article.findFirst({
+    where: { slug: { equals: slug, mode: "insensitive" }, status: "PUBLISHED" },
+    include: withCategories,
+  });
   if (!article) return null;
 
-  const categories = categoryRefs(article.id, db);
+  const links = await prisma.articleCategory.findMany({
+    where: {
+      articleId: { not: article.id },
+      article: { status: "PUBLISHED" },
+      category: { articles: { some: { articleId: article.id } } },
+    },
+    include: { article: { select: { slug: true, title: true, summary: true, updatedAt: true } } },
+    orderBy: { article: { updatedAt: "desc" } },
+  });
 
-  const related = db
-    .query<{ slug: string; title: string; summary: string }, [number, number]>(
-      `SELECT DISTINCT a.slug AS slug, a.title AS title, a.summary AS summary
-         FROM articles a
-         JOIN article_categories ac ON ac.article_id = a.id
-        WHERE ac.category_id IN (SELECT category_id FROM article_categories WHERE article_id = ?)
-          AND a.id != ?
-        ORDER BY a.updated_at DESC
-        LIMIT 5`,
-    )
-    .all(article.id, article.id);
+  const seen = new Set<string>();
+  const related: { slug: string; title: string; summary: string }[] = [];
+  for (const link of links) {
+    if (seen.has(link.article.slug)) continue;
+    seen.add(link.article.slug);
+    related.push({
+      slug: link.article.slug,
+      title: link.article.title,
+      summary: link.article.summary,
+    });
+    if (related.length === 5) break;
+  }
 
-  const revisions = getRevisions(article.id);
+  const revisions = await getRevisions(article.id);
 
   return {
-    article,
-    categories,
+    article: toArticleRow(article),
+    categories: categoriesOf(article),
     related,
     lastEditor: revisions[0]?.editor_name ?? null,
     lastNote: revisions[0]?.note ?? null,
     revisionCount: revisions.length,
-    knownSlugs: allSlugs(),
+    knownSlugs: await allSlugs(),
   };
-}
-
-/** Escape the LIKE wildcards so a search for "50%" means those characters. */
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 function plainText(markdown: string): string {
   return markdown
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_all, slug: string, label?: string) => label ?? slug)
+    .replace(
+      /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
+      (_all, slug: string, label?: string) => label ?? slug,
+    )
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/[#>*_`]/g, "")
     .replace(/\s+/g, " ")
@@ -167,75 +255,94 @@ function snippetAround(text: string, needle: string): string {
   return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
 }
 
-export function searchArticles(rawQuery: string): SearchResults {
+export async function searchArticles(rawQuery: string): Promise<SearchResults> {
   const query = rawQuery.trim();
   if (query.length === 0) return { query, count: 0, hits: [] };
 
-  const like = `%${escapeLike(query)}%`;
-  const rows = getDb()
-    .query<
-      {
-        slug: string;
-        title: string;
-        summary: string;
-        body: string;
-        updated_at: string;
-        match_title: number;
-      },
-      [string, string, string, string]
-    >(
-      `SELECT slug, title, summary, body, updated_at,
-              CASE WHEN title LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END AS match_title
-         FROM articles
-        WHERE title LIKE ? ESCAPE '\\'
-           OR summary LIKE ? ESCAPE '\\'
-           OR body LIKE ? ESCAPE '\\'
-        ORDER BY match_title DESC, length(title) ASC, title COLLATE NOCASE ASC`,
-    )
-    .all(like, like, like, like);
+  const contains = { contains: query, mode: "insensitive" as const };
+  const rows = await prisma.article.findMany({
+    where: {
+      status: "PUBLISHED",
+      OR: [{ title: contains }, { summary: contains }, { body: contains }],
+    },
+    select: { slug: true, title: true, summary: true, body: true, updatedAt: true },
+  });
 
-  const hits = rows.map((row) => ({
-    slug: row.slug,
-    title: row.title,
-    summary: row.summary,
-    updated_at: row.updated_at,
-    matchInTitle: row.match_title === 1,
-    snippet: row.match_title === 1 ? plainText(row.summary).slice(0, 180) : snippetAround(row.body, query),
-  }));
+  const hits = rows
+    .map((row) => {
+      const matchInTitle = row.title.toLowerCase().includes(query.toLowerCase());
+      return {
+        slug: row.slug,
+        title: row.title,
+        summary: row.summary,
+        updated_at: iso(row.updatedAt),
+        matchInTitle,
+        snippet: matchInTitle
+          ? plainText(row.summary).slice(0, 180)
+          : snippetAround(row.body, query),
+      };
+    })
+    // Title matches first, then shortest title, then A–Z. The GIN index from the
+    // search-index migration is what the ranked version of this will use.
+    .sort(
+      (a, b) =>
+        Number(b.matchInTitle) - Number(a.matchInTitle) ||
+        a.title.length - b.title.length ||
+        byTitle(a, b),
+    );
 
   return { query, count: hits.length, hits };
 }
 
-export function getStats() {
-  const db = getDb();
-  const one = <T,>(sql: string): T => db.query<T, []>(sql).get() as T;
-  const articles = one<{ n: number }>("SELECT COUNT(*) AS n FROM articles").n;
-  const categories = one<{ n: number }>("SELECT COUNT(*) AS n FROM categories").n;
-  const revisions = one<{ n: number }>("SELECT COUNT(*) AS n FROM revisions").n;
-  const lastUpdated =
-    one<{ t: string | null }>("SELECT MAX(updated_at) AS t FROM articles").t ?? null;
-  return { articles, categories, revisions, lastUpdated };
+export async function getStats() {
+  const [articles, categories, revisions, newest] = await Promise.all([
+    prisma.article.count({ where: { status: "PUBLISHED" } }),
+    prisma.category.count(),
+    prisma.revision.count({ where: { article: { status: "PUBLISHED" } } }),
+    prisma.article.aggregate({ where: { status: "PUBLISHED" }, _max: { updatedAt: true } }),
+  ]);
+  return {
+    articles,
+    categories,
+    revisions,
+    lastUpdated: newest._max.updatedAt ? iso(newest._max.updatedAt) : null,
+  };
 }
 
 /** Featured article: stable for a whole day, then moves on. */
-export function getFeaturedArticle(): ArticleRow | null {
-  const db = getDb();
-  const slugs = db
-    .query<{ slug: string }, []>("SELECT slug FROM articles ORDER BY slug")
-    .all();
+export async function getFeaturedArticle(): Promise<ArticleRow | null> {
+  const slugs = await allSlugs();
   if (slugs.length === 0) return null;
   const day = Math.floor(Date.now() / 86_400_000);
-  const pick = slugs[day % slugs.length].slug;
-  return getArticleBySlug(pick);
+  return getArticleBySlug(slugs[day % slugs.length]);
 }
 
-export function getHomeData(): HomeData {
-  const featured = getFeaturedArticle();
+export async function getHomeData(): Promise<HomeData> {
+  // A database that has been migrated but never seeded would render an empty
+  // front page; top it up from the seed content instead (one COUNT when the
+  // encyclopedia already has articles).
+  const { seedIfEmpty } = await import("./seed");
+  await seedIfEmpty();
+
+  const featured = await getFeaturedArticle();
+  const [recent, categories, stats] = await Promise.all([
+    getRecentArticles(6),
+    getCategories(),
+    getStats(),
+  ]);
+
+  const featuredArticle = featured
+    ? await prisma.article.findFirst({
+        where: { slug: featured.slug },
+        include: withCategories,
+      })
+    : null;
+
   return {
     featured,
-    featuredCategories: featured ? categoryRefs(featured.id) : [],
-    recent: getRecentArticles(6),
-    categories: getCategories(),
-    stats: getStats(),
+    featuredCategories: featuredArticle ? categoriesOf(featuredArticle) : [],
+    recent,
+    categories,
+    stats,
   };
 }

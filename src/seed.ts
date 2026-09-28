@@ -1,13 +1,15 @@
 /**
- * Seeding for Openpedia. Server-only.
+ * Seeding for Openpedia, on PostgreSQL. Server-only.
  *
  * Idempotent by design: articles and categories are upserted by slug, so
- * `bun run db:seed` can be run as often as you like. Existing articles keep
- * their original timestamps and revision history; only the text is refreshed
- * from `src/content/seed-data.ts`.
+ * `bun run db:seed` can be run as often as you like and `bun run setup` is safe
+ * to re-run. Existing articles keep their original timestamps and revision
+ * history; only the text is refreshed from `src/content/seed-data.ts`.
+ *
+ * Everything a seed writes is PUBLISHED, so the public pages show the whole
+ * encyclopedia the moment the database exists.
  */
-import type { Database } from "bun:sqlite";
-
+import { prisma } from "./prisma";
 import { SEED_ARTICLES, SEED_CATEGORIES } from "./content/seed-data";
 
 export type SeedReport = {
@@ -18,10 +20,7 @@ export type SeedReport = {
 };
 
 const DAY = 86_400_000;
-
-function iso(ms: number): string {
-  return new Date(ms).toISOString();
-}
+const HOUR = 3_600_000;
 
 /**
  * The first version of an article: everything up to (not including) the third
@@ -36,12 +35,7 @@ function firstVersion(body: string): string {
   return body.slice(0, headings[2]).trimEnd();
 }
 
-export function isSeeded(db: Database): boolean {
-  const row = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM articles").get();
-  return (row?.n ?? 0) > 0;
-}
-
-export function seedDatabase(db: Database, now = Date.now()): SeedReport {
+export async function seedDatabase(now = Date.now()): Promise<SeedReport> {
   const report: SeedReport = {
     categories: 0,
     articlesInserted: 0,
@@ -49,103 +43,111 @@ export function seedDatabase(db: Database, now = Date.now()): SeedReport {
     revisionsInserted: 0,
   };
 
-  const upsertCategory = db.prepare(
-    `INSERT INTO categories (slug, name, description) VALUES (?, ?, ?)
-     ON CONFLICT(slug) DO UPDATE SET name = excluded.name, description = excluded.description`,
-  );
-  const findCategory = db.prepare<{ id: number }, [string]>(
-    "SELECT id FROM categories WHERE slug = ?",
-  );
-  const linkCategory = db.prepare(
-    "INSERT INTO article_categories (article_id, category_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-  );
-  const clearLinks = db.prepare("DELETE FROM article_categories WHERE article_id = ?");
-
-  const findArticle = db.prepare<{ id: number }, [string]>(
-    "SELECT id FROM articles WHERE slug = ?",
-  );
-  const insertArticle = db.prepare(
-    `INSERT INTO articles (slug, title, summary, body, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  );
-  const updateArticle = db.prepare(
-    "UPDATE articles SET title = ?, summary = ?, body = ? WHERE slug = ?",
-  );
-  const countRevisions = db.prepare<{ n: number }, [number]>(
-    "SELECT COUNT(*) AS n FROM revisions WHERE article_id = ?",
-  );
-  const insertRevision = db.prepare(
-    `INSERT INTO revisions (article_id, title, body, editor_name, note, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  );
-
-  db.transaction(() => {
-    for (const category of SEED_CATEGORIES) {
-      upsertCategory.run(category.slug, category.name, category.description);
-      report.categories += 1;
-    }
-
-    SEED_ARTICLES.forEach((article, index) => {
-      // Spread the timestamps so "recently updated" is a real ordering rather
-      // than the order of the source file.
-      const updatedAt = now - ((index * 7) % 41) * DAY - 2 * 3_600_000;
-      const createdAt = updatedAt - (12 + (index % 5) * 3) * DAY;
-
-      const existing = findArticle.get(article.slug);
-      let articleId: number;
-      if (existing) {
-        updateArticle.run(article.title, article.summary, article.body, article.slug);
-        articleId = existing.id;
-        report.articlesUpdated += 1;
-      } else {
-        const info = insertArticle.run(
-          article.slug,
-          article.title,
-          article.summary,
-          article.body,
-          iso(createdAt),
-          iso(updatedAt),
-        );
-        articleId = Number(info.lastInsertRowid);
-        report.articlesInserted += 1;
+  // One transaction: a half-seeded encyclopedia is never left behind.
+  await prisma.$transaction(
+    async (tx) => {
+      for (const category of SEED_CATEGORIES) {
+        await tx.category.upsert({
+          where: { slug: category.slug },
+          update: { name: category.name, description: category.description },
+          create: {
+            slug: category.slug,
+            name: category.name,
+            description: category.description,
+          },
+        });
+        report.categories += 1;
       }
 
-      clearLinks.run(articleId);
-      for (const categorySlug of article.categories) {
-        const category = findCategory.get(categorySlug);
-        if (!category) throw new Error(`Unknown category in seed data: ${categorySlug}`);
-        linkCategory.run(articleId, category.id);
-      }
+      for (const [index, seed] of SEED_ARTICLES.entries()) {
+        // Spread the timestamps so "recently updated" is a real ordering rather
+        // than the order of the source file. They are written explicitly on
+        // every run, so re-seeding does not shuffle the front page.
+        const updatedAt = new Date(now - ((index * 7) % 41) * DAY - 2 * HOUR);
+        const createdAt = new Date(updatedAt.getTime() - (12 + (index % 5) * 3) * DAY);
+        const text = {
+          title: seed.title,
+          summary: seed.summary,
+          body: seed.body,
+          status: "PUBLISHED" as const,
+        };
 
-      const already = countRevisions.get(articleId)?.n ?? 0;
-      if (already === 0) {
-        const early = firstVersion(article.body);
-        insertRevision.run(
-          articleId,
-          article.title,
-          early,
-          "Openpedia editors",
-          "Initial version",
-          iso(createdAt),
-        );
-        insertRevision.run(
-          articleId,
-          article.title,
-          article.body,
-          "Openpedia editors",
-          "Copyedit: tightened the lead, added sections and internal links",
-          iso(updatedAt),
-        );
-        report.revisionsInserted += 2;
+        const existing = await tx.article.findUnique({
+          where: { slug: seed.slug },
+          select: { id: true },
+        });
+
+        let articleId: number;
+        if (existing) {
+          await tx.article.update({ where: { id: existing.id }, data: { ...text, updatedAt } });
+          articleId = existing.id;
+          report.articlesUpdated += 1;
+        } else {
+          const created = await tx.article.create({
+            data: { slug: seed.slug, ...text, createdAt, updatedAt },
+            select: { id: true },
+          });
+          articleId = created.id;
+          report.articlesInserted += 1;
+        }
+
+        await tx.articleCategory.deleteMany({ where: { articleId } });
+        for (const categorySlug of seed.categories) {
+          const category = await tx.category.findUnique({
+            where: { slug: categorySlug },
+            select: { id: true },
+          });
+          if (!category) throw new Error(`Unknown category in seed data: ${categorySlug}`);
+          await tx.articleCategory.create({ data: { articleId, categoryId: category.id } });
+        }
+
+        const already = await tx.revision.count({ where: { articleId } });
+        if (already === 0) {
+          await tx.revision.createMany({
+            data: [
+              {
+                articleId,
+                title: seed.title,
+                body: firstVersion(seed.body),
+                editorName: "Openpedia editors",
+                note: "Initial version",
+                createdAt,
+              },
+              {
+                articleId,
+                title: seed.title,
+                body: seed.body,
+                editorName: "Openpedia editors",
+                note: "Copyedit: tightened the lead, added sections and internal links",
+                createdAt: updatedAt,
+              },
+            ],
+          });
+          report.revisionsInserted += 2;
+        }
       }
-    });
-  })();
+    },
+    { timeout: 60_000, maxWait: 15_000 },
+  );
 
   return report;
 }
 
-/** Convenience used at startup: seed only when the database has no articles. */
-export function seedIfEmpty(db: Database): SeedReport | null {
-  if (isSeeded(db)) return null;
-  return seedDatabase(db);
+let inFlight: Promise<SeedReport | null> | null = null;
+
+/**
+ * Seed only when the database has no articles at all. Used at startup by the
+ * home page, so a fresh database is never an empty shell, and safe to call
+ * concurrently: the work happens once, the second caller awaits the same run.
+ */
+export async function seedIfEmpty(now = Date.now()): Promise<SeedReport | null> {
+  if (inFlight) return inFlight;
+  if ((await prisma.article.count()) > 0) return null;
+  const run = seedDatabase(now);
+  inFlight = run;
+  try {
+    return await run;
+  } finally {
+    inFlight = null;
+  }
 }
