@@ -56,7 +56,7 @@ function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
   );
 }
 
-export function SiteHeader() {
+export function SiteHeader({ session }: { session: { displayName: string } | null }) {
   return (
     <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#fcfbf7]/95 backdrop-blur">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3 sm:px-6">
@@ -71,14 +71,64 @@ export function SiteHeader() {
           className="order-3 -mt-1 flex w-full gap-4 text-sm sm:order-none sm:mt-0 sm:w-auto"
         >
           <NavLink to="/browse">Browse</NavLink>
-          <NavLink to="/browse">Categories</NavLink>
+          <NavLink to="/categories">Categories</NavLink>
           <NavLink to="/search">Search</NavLink>
         </nav>
-        <div className="ml-auto w-full sm:w-72">
-          <SearchForm />
+        <div className="ml-auto flex w-full items-center gap-4 sm:w-auto">
+          <div className="order-4 hidden w-full sm:order-none sm:block sm:w-64">
+            <SearchForm />
+          </div>
+          <AccountMenu session={session} />
         </div>
       </div>
     </header>
+  );
+}
+
+/**
+ * The account part of the header: "Log in / Sign up" for a visitor, and the
+ * editor's name plus "Log out" when signed in. Who is signed in is decided on
+ * the server (see `__root.tsx`), so this only renders what it is told.
+ */
+function AccountMenu({ session }: { session: { displayName: string } | null }) {
+  if (!session) {
+    return (
+      <p className="flex shrink-0 items-center gap-3 text-sm whitespace-nowrap">
+        <Link to="/login" className="text-stone-700 hover:text-rose-900 hover:underline">
+          Log in
+        </Link>
+        <Link
+          to="/signup"
+          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-stone-800 hover:border-rose-300 hover:bg-rose-50"
+        >
+          Sign up
+        </Link>
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-3 text-sm whitespace-nowrap">
+      <Link
+        to="/new"
+        className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-stone-800 hover:border-rose-300 hover:bg-rose-50"
+      >
+        New article
+      </Link>
+      <span className="text-stone-700">
+        <span className="text-stone-500">Signed in as</span>{" "}
+        <span className="font-medium text-stone-900">{session.displayName}</span>
+      </span>
+      {/* A plain POST: logging out deletes the session row, not just the cookie. */}
+      <form method="post" action="/api/auth/logout">
+        <button
+          type="submit"
+          className="text-stone-700 hover:text-rose-900 hover:underline"
+        >
+          Log out
+        </button>
+      </form>
+    </div>
   );
 }
 

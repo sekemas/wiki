@@ -3,6 +3,7 @@ import { Link, createFileRoute, notFound } from "@tanstack/react-router";
 import { Breadcrumbs, CategoryChips } from "~/components/layout";
 import { formatDate, timeAgo } from "~/lib/format";
 import { Markdown, extractHeadings } from "~/lib/markdown";
+import { Route as rootRoute } from "~/routes/__root";
 import { fetchArticle } from "~/server-fns";
 
 export const Route = createFileRoute("/wiki/$slug/")({
@@ -11,9 +12,21 @@ export const Route = createFileRoute("/wiki/$slug/")({
     if (!page) throw notFound();
     return page;
   },
+  // The URL a save redirects to carries the new revision, so the confirmation
+  // can link straight at it.
+  validateSearch: (search: Record<string, unknown>) => ({
+    saved: typeof search.saved === "string" ? search.saved : undefined,
+    created: typeof search.created === "string" ? search.created : undefined,
+  }),
   head: ({ loaderData }) => ({
     meta: [
-      { title: `${loaderData?.article.title ?? "Article"} - Openpedia` },
+      // An unknown slug renders this route's not-found page, so say that instead
+      // of leaving the site's generic title in place.
+      {
+        title: loaderData
+          ? `${loaderData.article.title} - Openpedia`
+          : "Page not found - Openpedia",
+      },
       { name: "description", content: loaderData?.article.summary.slice(0, 200) ?? "" },
     ],
   }),
@@ -22,9 +35,12 @@ export const Route = createFileRoute("/wiki/$slug/")({
 
 function ArticlePage() {
   const page = Route.useLoaderData();
+  const { saved, created } = Route.useSearch();
+  const { session } = rootRoute.useRouteContext();
   const { article, categories, related, lastEditor, revisionCount, knownSlugs } = page;
   const headings = extractHeadings(article.body);
   const toc = headings.filter((_, index) => index < 12);
+  const newRevision = saved ?? created;
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
@@ -36,6 +52,31 @@ function ArticlePage() {
           { label: article.title },
         ]}
       />
+
+      {newRevision ? (
+        <div className="mb-5 rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          {created ? <p className="font-medium">Your article is published.</p> : null}
+          <p className={created ? "mt-1" : ""}>
+            {created ? "It" : "Your edit"} was saved as revision{" "}
+            <Link
+              to="/wiki/$slug/revision/$id"
+              params={{ slug: article.slug, id: newRevision }}
+              className="font-medium underline hover:no-underline"
+            >
+              #{newRevision}
+            </Link>
+            {lastEditor ? ` by ${lastEditor}` : ""}. It may take a moment to appear in search.{" "}
+            <Link
+              to="/wiki/$slug/history"
+              params={{ slug: article.slug }}
+              className="underline hover:no-underline"
+            >
+              See the full history
+            </Link>
+            .
+          </p>
+        </div>
+      ) : null}
 
       <header className="border-b border-stone-200 pb-4">
         <h1 className="font-serif text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl">
@@ -52,6 +93,29 @@ function ArticlePage() {
           >
             View history
           </Link>
+        </p>
+        <p className="mt-3 text-sm">
+          {session ? (
+            <Link
+              to="/wiki/$slug/edit"
+              params={{ slug: article.slug }}
+              className="inline-block rounded-md border border-stone-300 bg-white px-3 py-1.5 text-stone-800 hover:border-rose-300 hover:bg-rose-50"
+            >
+              Edit this article
+            </Link>
+          ) : (
+            <Link
+              to="/login"
+              search={{
+                next: `/wiki/${article.slug}/edit`,
+                error: "Log in to edit this article.",
+                email: undefined,
+              }}
+              className="inline-block rounded-md border border-stone-300 bg-white px-3 py-1.5 text-stone-800 hover:border-rose-300 hover:bg-rose-50"
+            >
+              Log in to edit
+            </Link>
+          )}
         </p>
       </header>
 

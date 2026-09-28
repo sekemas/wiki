@@ -56,13 +56,59 @@ CREATE TABLE IF NOT EXISTS revisions (
   created_at  TEXT NOT NULL
 );
 
+-- Accounts. Made in-house: an email, a display name (the name that appears in
+-- revision history) and an argon2id password hash. No plaintext password is
+-- ever stored, logged or returned.
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT NOT NULL UNIQUE,
+  display_name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+
+-- Login sessions. Only the SHA-256 hash of the random token is stored: the
+-- cookie carries the token, the database carries the hash, so a leaked
+-- database file is not a pile of usable sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_updated    ON articles (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_slug       ON articles (slug);
 CREATE INDEX IF NOT EXISTS idx_revisions_article   ON revisions (article_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_categories_slug     ON categories (slug);
+CREATE INDEX IF NOT EXISTS idx_sessions_token      ON sessions (token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_user       ON sessions (user_id);
 `;
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot
+ * add a column to a table that already exists, so each one is checked against
+ * `PRAGMA table_info` first — the same idempotent-migration rule as the schema
+ * above, and safe to run on a database created by an earlier version.
+ */
+const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
+  {
+    table: "revisions",
+    column: "editor_user_id",
+    definition: "INTEGER REFERENCES users(id)",
+  },
+];
+
+function addMissingColumns(db: Database): void {
+  for (const { table, column, definition } of ADDED_COLUMNS) {
+    const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+    if (columns.some((c) => c.name === column)) continue;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 /** Absolute path of the SQLite file. */
 export function databaseFile(): string {
@@ -82,6 +128,7 @@ export function migrate(db: Database): void {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  addMissingColumns(db);
   db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
     String(SCHEMA_VERSION),
   );

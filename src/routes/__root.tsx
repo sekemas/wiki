@@ -1,6 +1,7 @@
 import { HeadContent, Link, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
 
 import { EmptyState, SearchForm, SiteFooter, SiteHeader } from "~/components/layout";
+import { fetchSession } from "~/server-fns";
 import appCss from "~/styles/app.css?url";
 
 export const Route = createRootRoute({
@@ -17,13 +18,22 @@ export const Route = createRootRoute({
     ],
     links: [{ rel: "stylesheet", href: appCss }],
   }),
+  /**
+   * Who is signed in, resolved on the server once per navigation and handed to
+   * the header. The browser never tells us who the editor is.
+   */
+  beforeLoad: async () => {
+    const { user } = await fetchSession();
+    return { session: user };
+  },
   notFoundComponent: NotFoundPage,
   component: RootComponent,
 });
 
 function RootComponent() {
+  const { session } = Route.useRouteContext();
   return (
-    <RootDocument>
+    <RootDocument session={session}>
       <Outlet />
     </RootDocument>
   );
@@ -57,6 +67,12 @@ function NotFoundPage() {
         >
           Browse all articles
         </Link>
+        <Link
+          to="/categories"
+          className="rounded-md border border-stone-300 bg-white px-4 py-2 text-stone-800 hover:border-rose-300 hover:bg-rose-50"
+        >
+          Categories
+        </Link>
       </div>
       <div className="mt-10">
         <EmptyState title="Nothing to show">
@@ -67,14 +83,20 @@ function NotFoundPage() {
   );
 }
 
-function RootDocument({ children }: { children: React.ReactNode }) {
+function RootDocument({
+  children,
+  session,
+}: {
+  children: React.ReactNode;
+  session: { displayName: string } | null;
+}) {
   return (
     <html lang="en">
       <head>
         <HeadContent />
       </head>
       <body className="flex min-h-dvh flex-col bg-[#fcfbf7]">
-        <SiteHeader />
+        <SiteHeader session={session} />
         <div className="flex-1">{children}</div>
         <SiteFooter />
         <Scripts />

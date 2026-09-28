@@ -111,6 +111,36 @@ export function getRevisions(articleId: number): RevisionRow[] {
     .all(articleId);
 }
 
+/** One revision of one article, or null (the pair must match). */
+export function getRevision(articleId: number, revisionId: number): RevisionRow | null {
+  return (
+    getDb()
+      .query<RevisionRow, [number, number]>(
+        "SELECT * FROM revisions WHERE id = ? AND article_id = ?",
+      )
+      .get(revisionId, articleId) ?? null
+  );
+}
+
+/** Everything the edit form starts from: the current article and its categories. */
+export function getArticleForEdit(slug: string): {
+  slug: string;
+  title: string;
+  summary: string;
+  body: string;
+  categorySlugs: string[];
+} | null {
+  const article = getArticleBySlug(slug);
+  if (!article) return null;
+  return {
+    slug: article.slug,
+    title: article.title,
+    summary: article.summary,
+    body: article.body,
+    categorySlugs: categoryRefs(article.id).map((category) => category.slug),
+  };
+}
+
 export function getArticlePage(slug: string): ArticlePage | null {
   const db = getDb();
   const article = getArticleBySlug(slug);
