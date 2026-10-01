@@ -35,6 +35,33 @@ To build and run the production server instead:
 bun run build && bun run start
 ```
 
+## Bringing the live site back up
+The published site (port 3000) runs on this machine against a local PostgreSQL. If
+the machine is restarted or replaced, one command puts it back:
+
+```bash
+bash scripts/start-live.sh            # add --rebuild to force a fresh vite build
+```
+
+It is idempotent, and there is nothing else to do — no `.env`, no manual step. In
+order it: installs PostgreSQL 16 if the binaries are gone; mounts the database
+image, or creates it on a first-ever run; starts the database server and makes
+sure the role and database exist; reinstalls the dependency tree if it is missing;
+applies the committed migrations; loads the seed content (upserts by slug); builds
+the site if `dist/` is missing; starts the site on port 3000; and waits until the
+site actually answers before reporting success.
+
+Two things about a machine replacement are worth knowing. The **database contents
+survive** it, and so does the git repository; the **PostgreSQL binaries, the
+dependency tree and the build do not** — the script reinstalls or rebuilds each of
+those. The database lives in a sparse ext4 *image file* on the persistent `/home`
+volume (`/home/team/.data/pgdata.img`, mounted at `/var/lib/openpedia-pg`), because
+`/home` hands every file it holds to `root`: PostgreSQL refuses to run as root and
+cannot own a directory there, so the cluster runs as the `postgres` user *inside*
+that image. `node_modules` stays off `/home` for the reason it always has —
+Prisma's engines do not fit there — and lives at `/opt/site/node_modules`,
+symlinked into the repository.
+
 ## The database
 
 PostgreSQL, described once in `prisma/schema.prisma` and built by the SQL
@@ -84,6 +111,7 @@ Compose file.
 ### Useful commands
 
 ```bash
+bash scripts/start-live.sh  # recovery: PostgreSQL + migrations + the site on port 3000
 bun run db:migrate       # apply the committed migrations (prisma migrate deploy)
 bun run db:migrate:dev   # author a new migration from a schema change
 bun run db:seed          # (re)load the starter articles, idempotently
